@@ -326,13 +326,13 @@ export class RyobiGDOApi {
   private handleWebSocketMessage(data: unknown | undefined) {
     const message = data as RyobiGDOWebSocketMessage;
     if (message?.method !== 'wskAttributeUpdateNtfy') {
-      this.logger.warn(`Unrecognized method: ${message.method}`);
+      this.logger.warn(`Unrecognized method: ${message.method}`, data);
       return;
     }
 
     const deviceId = message.params?.varName;
     if (typeof deviceId !== 'string') {
-      this.logger.warn('Unrecognized varName', deviceId);
+      this.logger.warn('Unrecognized varName', deviceId, message.params);
       return;
     }
 
