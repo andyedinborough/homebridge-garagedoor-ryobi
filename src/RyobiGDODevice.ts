@@ -4,6 +4,7 @@ export interface RyobiGDODevice {
   description: string;
   model: string;
   moduleId?: number;
+  obstructed?: boolean;
   portId?: number;
   state?: number;
   stateAsOf?: number;

@@ -1,24 +1,27 @@
 import type { Logger } from 'homebridge';
 import fetch, { RequestInit } from 'node-fetch';
+import { UV_FS_O_FILEMAP } from 'node:constants';
 import WebSocket from 'ws';
 import { DeviceStatusResponse, GetDeviceResponse, LoginResponse } from './RyobiGDO';
 import { RyobiGDOCredentials } from './RyobiGDOCredentials';
 import { RyobiGDODevice } from './RyobiGDODevice';
 import { RyobiGDOSession } from './RyobiGDOSession';
+import { RyobiGDOWebSocketMessage, RyobiWebSocketValue } from './RyobiGDOWebSocketMessage';
 
 const apikeyURL = 'https://tti.tiwiconnect.com/api/login';
 const deviceURL = 'https://tti.tiwiconnect.com/api/devices';
 const websocketURL = 'wss://tti.tiwiconnect.com/api/wsrpc';
 
-export type DoorState = 'CLOSED' | 'OPEN' | 'CLOSING' | 'OPENING';
-const doorStateMap = new Map<number, DoorState>([
-  [0, 'CLOSED'],
-  [1, 'OPEN'],
-  [2, 'CLOSING'],
-  [3, 'OPENING'],
-]);
+type MessageHandler = (deviceId: string, module: string, name: string, data: RyobiWebSocketValue) => void;
 
 export class RyobiGDOApi {
+  private _websocket: WebSocket | undefined;
+  private _pingTimer: NodeJS.Timer | undefined;
+  private _reconnectTimer: NodeJS.Timer | undefined;
+  private _websocketPromise: Promise<WebSocket> | undefined;
+  private readonly _subscribed: Record<string, boolean> = {};
+  private readonly _listeners = new Set<MessageHandler>();
+
   constructor(
     private readonly session: RyobiGDOSession,
     private readonly credentials: RyobiGDOCredentials,
@@ -28,7 +31,7 @@ export class RyobiGDOApi {
   public async openDoor(device: Partial<RyobiGDODevice>): Promise<void> {
     this.logger.debug('GARAGEDOOR openDoor');
     try {
-      await this.sendWebsocketCommand(device, { doorCommand: 1 });
+      await this.sendWebsocketCommand(device, this.getDoorCommand(device, true));
     } catch (x) {
       this.logger.error(`Error sending openDoor command: ${x}`);
     }
@@ -37,27 +40,27 @@ export class RyobiGDOApi {
   public async closeDoor(device: Partial<RyobiGDODevice>): Promise<void> {
     this.logger.debug('GARAGEDOOR closeDoor');
     try {
-      await this.sendWebsocketCommand(device, { doorCommand: 0 });
+      await this.sendWebsocketCommand(device, this.getDoorCommand(device, false));
     } catch (x) {
       this.logger.error(`Error sending closeDoor command: ${x}`);
     }
   }
 
-  public async getStatus(device: Partial<RyobiGDODevice>): Promise<DoorState | undefined> {
-    this.logger.debug('Updating ryobi data');
-
-    await this.updateDevice(device);
-
-    if (device.state === undefined) {
-      this.logger.error('Unable to query door state');
-      return undefined;
-    }
-
-    const homekit_doorstate = doorStateMap.get(device.state);
-    return homekit_doorstate;
+  private getDoorCommand(device: Partial<RyobiGDODevice>, open: boolean) {
+    return {
+      jsonrpc: '2.0',
+      method: 'gdoModuleCommand',
+      params: {
+        msgType: 16,
+        moduleType: device.moduleId,
+        portId: device.portId,
+        moduleMsg: { doorCommand: open ? 1 : 0 },
+        topic: device.id,
+      },
+    };
   }
 
-  private async updateDevice(device: Partial<RyobiGDODevice>) {
+  public async updateDevice(device: Partial<RyobiGDODevice>) {
     if (!device.id) {
       await this.getDeviceId(device);
     }
@@ -83,8 +86,12 @@ export class RyobiGDOApi {
 
     device.portId = toNumber(garageDoorModule?.at?.portId?.value);
     device.moduleId = toNumber(garageDoorModule?.at?.moduleId?.value);
-    device.state = toNumber(values.result?.[0]?.deviceTypeMap?.['garageDoor_' + device.portId]?.at?.doorState?.value);
+    const at = values.result?.[0]?.deviceTypeMap?.['garageDoor_' + device.portId]?.at;
+    device.state = toNumber(at?.doorState?.value);
+    device.obstructed = toBool(at?.sensorFlag?.value);
     device.stateAsOf = Date.now();
+
+    await this.subscribeToNotifications(device);
   }
 
   private async request(url: string, init?: RequestInit) {
@@ -179,6 +186,32 @@ export class RyobiGDOApi {
     return result?.result;
   }
 
+  public subscribe(listener: MessageHandler) {
+    this._listeners.add(listener);
+  }
+
+  private async subscribeToNotifications(device: Partial<RyobiGDODevice>) {
+    if (!device.id) {
+      this.logger.error('Cannot unsubscribe without a device id');
+      return;
+    }
+    await this.unsubscribeToNotifications(device);
+    const cmd = { jsonrpc: '2.0', method: 'wskSubscribe', params: { topic: `${device.id}.wskAttributeUpdateNtfy` } };
+    await this.sendWebsocketCommand(device, cmd);
+    this._subscribed[device.id] = true;
+  }
+
+  private async unsubscribeToNotifications(device: Partial<RyobiGDODevice>) {
+    if (!device.id) {
+      this.logger.error('Cannot unsubscribe without a device id');
+      return;
+    }
+    if (!this._subscribed[device.id]) return;
+    const cmd = { jsonrpc: '2.0', method: 'wskUnsubscribe', params: { topic: `${device.id}.wskAttributeUpdateNtfy` } };
+    await this.sendWebsocketCommand(device, cmd);
+    delete this._subscribed[device.id];
+  }
+
   private async sendWebsocketCommand(device: Partial<RyobiGDODevice>, message: unknown) {
     if (!device.moduleId || !device.portId) {
       await this.updateDevice(device);
@@ -191,9 +224,52 @@ export class RyobiGDOApi {
       throw new Error('doorPortId is undefined');
     }
 
-    let complete = false;
-    const apiKey = await this.getApiKey();
-    const promise = new Promise<void>((resolve, reject) => {
+    const ws = await this.openWebSocket();
+
+    const sendMessage = JSON.stringify(message, null, 2);
+    this.logger.debug('sending websocket: ' + sendMessage);
+    ws.send(sendMessage);
+    this.logger.debug('sending ping');
+    await this.ping(ws);
+
+    this.logger.debug('command finished');
+  }
+
+  private async ping(ws: WebSocket) {
+    const id = `ping:${Math.random()}`;
+    return new Promise<void>((resolve, reject) => {
+      let tmr = setTimeout(() => reject(), 30e3);
+      const handlePong = (data: Buffer) => {
+        if (data.toString() === id) {
+          clearTimeout(tmr);
+          ws.off('pong', handlePong);
+          resolve();
+        }
+      };
+      ws.on('pong', handlePong);
+      ws.ping(id);
+    });
+  }
+
+  private async closeWebSocket() {
+    const { _websocket } = this;
+    this._websocket = undefined;
+    this._websocketPromise = undefined;
+    if (this._pingTimer) {
+      clearInterval(this._pingTimer);
+    }
+    if (!_websocket) return;
+    _websocket.close();
+  }
+
+  private async openWebSocket(): Promise<WebSocket> {
+    if (this._websocket) return this._websocket;
+    if (this._websocketPromise) return await this._websocketPromise;
+
+    this.closeWebSocket();
+
+    this._websocketPromise = new Promise<WebSocket>(async (resolve, reject) => {
+      const apiKey = await this.getApiKey();
       const ws = new WebSocket(websocketURL);
       ws.on('open', () => {
         const login = JSON.stringify({
@@ -210,53 +286,71 @@ export class RyobiGDOApi {
         this.logger.debug('message received: ' + data);
 
         const returnObj = JSON.parse(data.toString());
-        if (!returnObj.result?.authorized) {
-          return;
+        if (!this._websocket && returnObj?.result?.authorized) {
+          this._websocket = ws;
+          this._pingTimer = setInterval(() => ws.ping(), 30e3);
+          resolve(ws);
+        } else if (this._websocket) {
+          this.handleWebSocketMessage(data);
         }
-        const sendMessage = JSON.stringify(
-          {
-            jsonrpc: '2.0',
-            method: 'gdoModuleCommand',
-            params: {
-              msgType: 16,
-              moduleType: device.moduleId,
-              portId: device.portId,
-              moduleMsg: message,
-              topic: device.id,
-            },
-          },
-          null,
-          2,
-        );
-        this.logger.debug('sending websocket: ' + sendMessage);
-        ws.send(sendMessage);
-        complete = true;
-        this.logger.debug('sending ping');
-        ws.ping();
       });
 
-      ws.on('pong', () => {
-        this.logger.debug('pong; terminate');
-        ws.terminate();
-        resolve();
-      });
-
-      ws.on('close', () => {
+      ws.on('close', (code: number, reason: string) => {
         this.logger.debug('closing');
-        if (!complete) {
-          this.logger.error('WebSocket closing before completed');
-          reject('WebSocket closed prematurely');
+        if (this._websocket) {
+          this.logger.error(`WebSocket closing unexpectedly: ${code} -- ${reason}`);
+        } else {
+          this.logger.error(`WebSocket could not fully open: ${code} -- ${reason}`);
+          reject('WebSocket closed');
         }
+        this.reopenWebSocket();
       });
 
       ws.on('error', (x) => {
         this.logger.error('WebSocket error: ' + x);
-        reject(x);
+        if (!this._websocket) {
+          reject(x);
+        }
+        this.reopenWebSocket();
       });
     });
 
-    await promise;
-    this.logger.debug('command finished');
+    return await this._websocketPromise;
+  }
+
+  private reopenWebSocket() {
+    this.closeWebSocket();
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+    }
+    this._reconnectTimer = setTimeout(() => this.openWebSocket(), 5e3);
+  }
+
+  private handleWebSocketMessage(data: unknown | undefined) {
+    const message = data as RyobiGDOWebSocketMessage;
+    if (message?.method !== 'wskAttributeUpdateNtfy') {
+      this.logger.debug(`Unrecognized method: ${message.method}`);
+      return;
+    }
+
+    const deviceId = message.params.varName;
+    if (typeof deviceId !== 'string') {
+      this.logger.debug('Unrecognized varName', deviceId);
+      return;
+    }
+
+    const values = Object.entries(message.params);
+    for (const [name, value] of values) {
+      const [_, module, property] = name.match(/(\w+)\.(\w+)/) ?? [];
+      if (!module || !property || typeof value === 'string') continue;
+      for (const listener of Array.from(this._listeners)) {
+        try {
+          listener(deviceId, module, property, value);
+        } catch (x) {
+          this.logger.error(`Error triggering listener for ${module}.${property}`, value, x);
+        }
+      }
+    }
   }
 }
 
@@ -275,4 +369,8 @@ export function updateSessionFromCookies(session: RyobiGDOSession, cookies: stri
 
 function toNumber(value: unknown) {
   return typeof value === 'number' ? value : undefined;
+}
+
+function toBool(value: unknown) {
+  return typeof value === 'boolean' ? value : undefined;
 }

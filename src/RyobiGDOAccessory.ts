@@ -13,9 +13,18 @@ import { RyobiGDOApi } from './RyobiGDOApi';
 import { RyobiGDODevice } from './RyobiGDODevice';
 import { RyobiGDOPlatform } from './RyobiGDOPlatform';
 import { RyobiGDOSession } from './RyobiGDOSession';
+import { RyobiWebSocketValue } from './RyobiGDOWebSocketMessage';
 
 const POLL_SHORT_DEFAULT = 15e3;
 const POLL_LONG_DEFAULT = 90e3;
+
+export type DoorState = 'CLOSED' | 'OPEN' | 'CLOSING' | 'OPENING';
+const doorStateMap = new Map<number, DoorState>([
+  [0, 'CLOSED'],
+  [1, 'OPEN'],
+  [2, 'CLOSING'],
+  [3, 'OPENING'],
+]);
 
 interface AccesoryOptions {
   platform?: RyobiGDOPlatform;
@@ -197,13 +206,23 @@ export class RyobiGDOAccessory {
   }
 
   private async pollStateNow() {
-    let state = 0;
+    let state = -1;
     try {
       this.cancelPoll();
       this.logger.debug(`Polling state of ${this.ryobi_device.name}`);
-      const status = await this.ryobi.getStatus(this.ryobi_device);
+
+      await this.ryobi.updateDevice(this.ryobi_device);
+      if (this.ryobi_device.state === undefined) {
+        this.logger.warn('Unable to get device state');
+        return;
+      }
+
+      this.ryobi.subscribe(this.handleMessage);
+
+      state = this.mapDoorState(this.ryobi_device.state);
+
       this.updateContext();
-      this.logger.info(`${this.ryobi_device.name}: ${status} (${state})`);
+      this.logger.info(`${this.ryobi_device.name}: ${doorStateMap.get(this.ryobi_device.state)} (${this.ryobi_device.state})`);
 
       const { garageDoorService } = this;
       if (!garageDoorService) {
@@ -211,9 +230,13 @@ export class RyobiGDOAccessory {
         return;
       }
 
-      state = this.Characteristic.CurrentDoorState[status ?? 'CLOSED'];
       if (state !== this.getState()) {
         garageDoorService.setCharacteristic(this.Characteristic.CurrentDoorState, state);
+      }
+
+      const wasObstructed = !!garageDoorService.getCharacteristic(this.Characteristic.ObstructionDetected).value;
+      if (this.ryobi_device.obstructed !== wasObstructed) {
+        garageDoorService.setCharacteristic(this.Characteristic.ObstructionDetected, wasObstructed);
       }
 
       if (this.context) {
@@ -225,6 +248,43 @@ export class RyobiGDOAccessory {
     const isActive = state === this.Characteristic.CurrentDoorState.OPENING || state === this.Characteristic.CurrentDoorState.CLOSING;
     const delay = isActive ? 3e3 : this.poll_long_delay;
     this.stateTimer = setTimeout(() => this.pollStateNow(), delay);
+  }
+
+  private handleMessage = (deviceId: string, module: string, property: string, data: RyobiWebSocketValue) => {
+    const { garageDoorService } = this;
+    if (!garageDoorService) return;
+
+    switch (property) {
+      case 'doorState':
+        if (typeof data.value === 'number') {
+          const status = this.mapDoorState(data.value);
+          garageDoorService.setCharacteristic(this.Characteristic.CurrentDoorState, status);
+        }
+        break;
+
+      case 'alarmState':
+        if (typeof data.value === 'boolean') {
+          garageDoorService.setCharacteristic(this.Characteristic.ObstructionDetected, data.value);
+        }
+        break;
+
+      case 'doorPosition':
+        if (typeof data.value === 'number') {
+          garageDoorService.setCharacteristic(this.Characteristic.CurrentPosition, data.value);
+        }
+        break;
+
+      case 'motionSensor':
+        if (typeof data.value === 'boolean') {
+          garageDoorService.setCharacteristic(this.Characteristic.MotionDetected, data.value);
+        }
+        break;
+    }
+  };
+
+  private mapDoorState(ryobiValue: number): number {
+    const status = doorStateMap.get(ryobiValue);
+    return this.Characteristic.CurrentDoorState[status ?? 'CLOSED'];
   }
 
   private updateContext() {
