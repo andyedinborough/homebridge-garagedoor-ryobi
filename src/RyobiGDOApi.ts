@@ -90,8 +90,6 @@ export class RyobiGDOApi {
     device.state = toNumber(at?.doorState?.value);
     device.obstructed = toBool(at?.sensorFlag?.value);
     device.stateAsOf = Date.now();
-
-    await this.subscribeToNotifications(device);
   }
 
   private async request(url: string, init?: RequestInit) {
@@ -186,22 +184,20 @@ export class RyobiGDOApi {
     return result?.result;
   }
 
-  public subscribe(listener: MessageHandler) {
+  public async subscribe(device: Partial<RyobiGDODevice>, listener: MessageHandler) {
     this._listeners.add(listener);
-  }
 
-  private async subscribeToNotifications(device: Partial<RyobiGDODevice>) {
     if (!device.id) {
       this.logger.error('Cannot unsubscribe without a device id');
       return;
     }
-    await this.unsubscribeToNotifications(device);
+    await this.unsubscribe(device);
     const cmd = { jsonrpc: '2.0', method: 'wskSubscribe', params: { topic: `${device.id}.wskAttributeUpdateNtfy` } };
     await this.sendWebsocketCommand(device, cmd);
     this._subscribed[device.id] = true;
   }
 
-  private async unsubscribeToNotifications(device: Partial<RyobiGDODevice>) {
+  private async unsubscribe(device: Partial<RyobiGDODevice>) {
     if (!device.id) {
       this.logger.error('Cannot unsubscribe without a device id');
       return;
@@ -330,21 +326,33 @@ export class RyobiGDOApi {
   private handleWebSocketMessage(data: unknown | undefined) {
     const message = data as RyobiGDOWebSocketMessage;
     if (message?.method !== 'wskAttributeUpdateNtfy') {
-      this.logger.debug(`Unrecognized method: ${message.method}`);
+      this.logger.warn(`Unrecognized method: ${message.method}`);
       return;
     }
 
-    const deviceId = message.params.varName;
+    const deviceId = message.params?.varName;
     if (typeof deviceId !== 'string') {
-      this.logger.debug('Unrecognized varName', deviceId);
+      this.logger.warn('Unrecognized varName', deviceId);
+      return;
+    }
+
+    const listeners = Array.from(this._listeners);
+    if (listeners.length === 0) {
+      this.logger.warn('No listeners to trigger event');
       return;
     }
 
     const values = Object.entries(message.params);
     for (const [name, value] of values) {
       const [_, module, property] = name.match(/(\w+)\.(\w+)/) ?? [];
-      if (!module || !property || typeof value === 'string') continue;
-      for (const listener of Array.from(this._listeners)) {
+      if (!module || !property || typeof value === 'string') {
+        if (name !== 'varName' && name !== 'topic') {
+          this.logger.warn(`Invalid data: ${name}`, value);
+        }
+        continue;
+      }
+
+      for (const listener of listeners) {
         try {
           listener(deviceId, module, property, value);
         } catch (x) {

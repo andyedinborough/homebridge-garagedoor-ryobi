@@ -217,7 +217,7 @@ export class RyobiGDOAccessory {
         return;
       }
 
-      this.ryobi.subscribe(this.handleMessage);
+      await this.ryobi.subscribe(this.ryobi_device, this.handleMessage);
 
       state = this.mapDoorState(this.ryobi_device.state);
 
