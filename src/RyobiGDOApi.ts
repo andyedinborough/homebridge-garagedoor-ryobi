@@ -288,7 +288,7 @@ export class RyobiGDOApi {
           this.logger.info('websocket connected');
           resolve(ws);
         } else if (this._websocket) {
-          this.handleWebSocketMessage(data);
+          this.handleWebSocketMessage(returnObj);
         }
       });
 
@@ -326,7 +326,7 @@ export class RyobiGDOApi {
   private handleWebSocketMessage(data: unknown | undefined) {
     const message = data as RyobiGDOWebSocketMessage;
     if (message?.method !== 'wskAttributeUpdateNtfy') {
-      this.logger.warn(`Unrecognized method: ${message.method}`, data);
+      this.logger.warn(`Unrecognized method: ${message?.method}`, data);
       return;
     }
 
