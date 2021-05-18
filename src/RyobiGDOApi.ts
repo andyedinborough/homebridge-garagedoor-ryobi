@@ -289,6 +289,7 @@ export class RyobiGDOApi {
         if (!this._websocket && returnObj?.result?.authorized) {
           this._websocket = ws;
           this._pingTimer = setInterval(() => ws.ping(), 30e3);
+          this.logger.info('websocket connected');
           resolve(ws);
         } else if (this._websocket) {
           this.handleWebSocketMessage(data);

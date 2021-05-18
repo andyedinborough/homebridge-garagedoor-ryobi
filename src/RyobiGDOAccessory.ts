@@ -254,6 +254,8 @@ export class RyobiGDOAccessory {
     const { garageDoorService } = this;
     if (!garageDoorService) return;
 
+    this.logger.info(`device ${deviceId} ${property} ${data.value}`);
+
     switch (property) {
       case 'doorState':
         if (typeof data.value === 'number') {
