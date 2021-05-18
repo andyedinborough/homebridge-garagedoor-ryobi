@@ -266,7 +266,7 @@ export class RyobiGDOAccessory {
 
       case 'alarmState':
         if (typeof data.value === 'boolean') {
-          garageDoorService.setCharacteristic(this.Characteristic.ObstructionDetected, data.value);
+          garageDoorService.setCharacteristic(this.Characteristic.AudioFeedback, data.value);
         }
         break;
 
