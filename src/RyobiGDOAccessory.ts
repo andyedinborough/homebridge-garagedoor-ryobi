@@ -18,12 +18,12 @@ import { RyobiWebSocketValue } from './RyobiGDOWebSocketMessage';
 const POLL_SHORT_DEFAULT = 15e3;
 const POLL_LONG_DEFAULT = 90e3;
 
-export type DoorState = 'CLOSED' | 'OPEN' | 'CLOSING' | 'OPENING';
+export type DoorState = 'CLOSED' | 'OPEN' | 'OPENING' | 'CLOSING';
 const doorStateMap = new Map<number, DoorState>([
   [0, 'CLOSED'],
   [1, 'OPEN'],
-  [2, 'CLOSING'],
-  [3, 'OPENING'],
+  [2, 'OPENING'],
+  [3, 'CLOSING'],
 ]);
 
 interface AccesoryOptions {
