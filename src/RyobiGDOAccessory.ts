@@ -270,6 +270,12 @@ export class RyobiGDOAccessory {
         }
         break;
 
+      case 'sensorFlag':
+        if (typeof data.value === 'boolean') {
+          garageDoorService.setCharacteristic(this.Characteristic.ObstructionDetected, data.value);
+        }
+        break;
+
       case 'doorPosition':
         if (typeof data.value === 'number') {
           garageDoorService.setCharacteristic(this.Characteristic.CurrentPosition, data.value);
