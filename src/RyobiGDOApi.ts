@@ -239,6 +239,7 @@ export class RyobiGDOApi {
         if (data.toString() === id) {
           clearTimeout(tmr);
           ws.off('pong', handlePong);
+          this.logger.info('ping complete');
           resolve();
         }
       };
