@@ -217,11 +217,15 @@ export class RyobiGDOAccessory {
         return;
       }
 
-      await this.ryobi.subscribe(this.ryobi_device, this.handleMessage);
+      this.updateContext();
+      try {
+        await this.ryobi.subscribe(this.ryobi_device, this.handleMessage);
+      } catch (x) {
+        this.logger.error('Unable to subscribe', x);
+      }
 
       state = this.mapDoorState(this.ryobi_device.state);
 
-      this.updateContext();
       this.logger.info(`${this.ryobi_device.name}: ${doorStateMap.get(this.ryobi_device.state)} (${this.ryobi_device.state})`);
 
       const { garageDoorService } = this;
@@ -236,7 +240,7 @@ export class RyobiGDOAccessory {
 
       const wasObstructed = !!garageDoorService.getCharacteristic(this.Characteristic.ObstructionDetected).value;
       if (this.ryobi_device.obstructed !== wasObstructed) {
-        garageDoorService.setCharacteristic(this.Characteristic.ObstructionDetected, wasObstructed);
+        garageDoorService.getCharacteristic(this.Characteristic.ObstructionDetected).updateValue(wasObstructed);
       }
 
       if (this.context) {
@@ -260,31 +264,31 @@ export class RyobiGDOAccessory {
       case 'doorState':
         if (typeof data.value === 'number') {
           const status = this.mapDoorState(data.value);
-          garageDoorService.setCharacteristic(this.Characteristic.CurrentDoorState, status);
+          garageDoorService.getCharacteristic(this.Characteristic.CurrentDoorState).updateValue(status);
         }
         break;
 
       case 'alarmState':
         if (typeof data.value === 'boolean') {
-          garageDoorService.setCharacteristic(this.Characteristic.AudioFeedback, data.value);
+          garageDoorService.getCharacteristic(this.Characteristic.AudioFeedback).updateValue(data.value);
         }
         break;
 
       case 'sensorFlag':
         if (typeof data.value === 'boolean') {
-          garageDoorService.setCharacteristic(this.Characteristic.ObstructionDetected, data.value);
+          garageDoorService.getCharacteristic(this.Characteristic.ObstructionDetected).updateValue(data.value);
         }
         break;
 
       case 'doorPosition':
         if (typeof data.value === 'number') {
-          garageDoorService.setCharacteristic(this.Characteristic.CurrentPosition, data.value);
+          garageDoorService.getCharacteristic(this.Characteristic.CurrentPosition).updateValue(data.value);
         }
         break;
 
       case 'motionSensor':
         if (typeof data.value === 'boolean') {
-          garageDoorService.setCharacteristic(this.Characteristic.MotionDetected, data.value);
+          garageDoorService.getCharacteristic(this.Characteristic.MotionDetected).updateValue(data.value);
         }
         break;
     }

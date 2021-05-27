@@ -185,7 +185,9 @@ export class RyobiGDOApi {
   }
 
   public async subscribe(device: Partial<RyobiGDODevice>, listener: MessageHandler) {
-    this._listeners.add(listener);
+    if (!this._listeners.has(listener)) {
+      this._listeners.add(listener);
+    }
 
     if (!device.id) {
       this.logger.error('Cannot unsubscribe without a device id');
